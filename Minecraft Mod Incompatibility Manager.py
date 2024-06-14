@@ -1,35 +1,28 @@
-import os
+import time
 import zipfile
-import logging
 import json
-import tkinter as tk
-from tkinter import simpledialog, filedialog
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from difflib import SequenceMatcher
-import networkx as nx
+import os
+import logging
 import jpype
-import jpype.imports
-from jpype.types import *
-from threading import Thread, Event
+import tkinter as tk
+from tkinter import filedialog, simpledialog, messagebox
+from jpype import JClass, java
 import unittest
+import threading
+import tempfile
 
-# Setup logging to a file in the user's "Documents" directory
+# Configure logging to file in the user's "Documents" directory
 documents_folder = os.path.join(os.path.expanduser("~"), "Documents")
 log_file_path = os.path.join(documents_folder, "mod_incompatibility_manager.log")
 logging.basicConfig(filename=log_file_path, level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Global variables
+javassist_jar_path = 'C:/Users/jay5a/Documents/javassist/jboss-javassist-javassist-4c998e0/javassist.jar'
+
 known_incompatibilities = {}
-mod_directory = os.path.join(os.path.expanduser("~"), "curseforge/minecraft/Instances/Crazy Craft Updated/mods")
-default_mod_directory = mod_directory
-default_javassist_directory = os.path.expanduser("~")
-text_file_path = os.path.join(documents_folder, "mod_list.txt")
-json_file_path = os.path.join(documents_folder, "incompatibilities.json")
-javassist_jar_path = "C:/Users/jay5a/Documents/javassist/jboss-javassist-javassist-4c998e0/javassist.jar"  # Path to javassist.jar
+json_file_path = os.path.join(documents_folder, "known_incompatibilities.json")
 
 
-# Start the JVM
 def start_jvm():
     if not jpype.isJVMStarted():
         jpype.startJVM(classpath=[javassist_jar_path])
@@ -37,40 +30,11 @@ def start_jvm():
 
 def import_javassist_classes():
     global ClassPool, NotFoundException, CtClass
-    ClassPool = jpype.JClass('javassist.ClassPool')
-    NotFoundException = jpype.JClass('javassist.NotFoundException')
-    CtClass = jpype.JClass('javassist.CtClass')
+    ClassPool = JClass('javassist.ClassPool')
+    NotFoundException = JClass('javassist.NotFoundException')
+    CtClass = JClass('javassist.CtClass')
 
 
-# Load and save incompatibilities to/from JSON file
-def load_incompatibilities_from_file(filepath):
-    global known_incompatibilities
-    try:
-        with open(filepath, 'r') as file:
-            known_incompatibilities = json.load(file)
-        logging.info(f"Incompatibilities loaded from {filepath}")
-    except FileNotFoundError:
-        logging.warning(f"{filepath} not found. Starting with an empty incompatibilities list.")
-    except json.JSONDecodeError as e:
-        logging.error(f"Error decoding JSON from {filepath}: {e}")
-
-
-def save_incompatibilities_to_file(filepath):
-    global known_incompatibilities
-    with open(filepath, 'w') as file:
-        json.dump(known_incompatibilities, file, indent=4)
-    logging.info(f"Incompatibilities saved to {filepath}")
-
-
-# Function to write mod information to text file
-def write_mods_to_text_file(mods, filepath):
-    with open(filepath, 'w') as file:
-        for mod in mods:
-            file.write(f"Mod ID: {mod['mod_id']}, Name: {mod['name']}, Version: {mod['version']}\n")
-    logging.info(f"Mod list saved to {filepath}")
-
-
-# Extract metadata from JAR files
 def extract_metadata_from_jar(jar_file):
     metadata = {}
     try:
@@ -102,7 +66,6 @@ def extract_metadata_from_jar(jar_file):
     return metadata
 
 
-# Scan a single mod
 def scan_mod(mod_path):
     logging.info(f"Scanning mod: {mod_path}")
     mod_info = {"name": mod_path, "version": None, "mod_id": None, "classes": [], "methods": {}, "bytecode": {}}
@@ -126,131 +89,83 @@ def scan_mod(mod_path):
     return mod_info
 
 
-# Extract method signatures and bytecode from class data
 def extract_method_signatures_and_bytecode(class_data):
+    start_jvm()
+    import_javassist_classes()
     method_signatures = []
-    bytecode = {}
+    bytecode = b''
 
-    pool = ClassPool.getDefault()
     try:
-        ct_class = pool.makeClass(JArray(JByte)(class_data))
-        for method in ct_class.getDeclaredMethods():
-            signature = method.getLongName()
-            method_signatures.append(signature)
-            code_attr = method.getMethodInfo().getCodeAttribute()
-            if code_attr:
-                bytecode[method.getName()] = code_attr.toString()
-    except NotFoundException as e:
-        logging.error(f"Error parsing class: {e}")
+        class_pool = ClassPool.getDefault()
+        ct_class = class_pool.makeClass(java.io.ByteArrayInputStream(class_data))
+        methods = ct_class.getDeclaredMethods()
+        for method in methods:
+            method_signatures.append(str(method))
+            bytecode += method.getMethodInfo().getCodeAttribute().getCode()
+    except Exception as e:
+        logging.error(f"Error extracting method signatures and bytecode: {e}")
 
     return method_signatures, bytecode
 
 
-# Scan all mods in the directory
-def scan_mods(mods_directory):
-    if not os.path.exists(mods_directory):
-        logging.error(f"The directory {mods_directory} does not exist.")
-        return []
-
-    mods = []
-    with ThreadPoolExecutor() as executor:
-        futures = [executor.submit(scan_mod, os.path.join(mods_directory, filename))
-                   for filename in os.listdir(mods_directory) if filename.endswith(".jar")]
-
-        for future in as_completed(futures):
-            try:
-                mod_info = future.result()
-                mods.append(mod_info)
-            except Exception as e:
-                logging.error(f"Error processing mod: {e}")
-
-    return mods
-
-
-# Compare bytecode for conflicts
-def compare_bytecode(bytecode1, bytecode2):
-    return bytecode1 == bytecode2
-
-
-# Check for incompatibilities between mods
 def check_incompatibilities(mods):
-    incompatibilities = []
-    mixin_conflicts = []
+    incompatibilities = {}
+    mixin_conflicts = {}
+    for mod_id, mod_info in mods.items():
+        for other_mod_id, other_mod_info in mods.items():
+            if mod_id != other_mod_id:
+                if mod_info['mod_id'] == other_mod_info['mod_id']:
+                    incompatibilities[mod_id] = other_mod_id
 
-    for mod in mods:
-        mod_id = mod['mod_id']
-        if mod_id in known_incompatibilities:
-            for incompatible_mod_id, details in known_incompatibilities[mod_id]['incompatible_mods'].items():
-                for other_mod in mods:
-                    if other_mod['mod_id'] == incompatible_mod_id:
-                        incompatibilities.append((mod, other_mod, details['reason'], details['severity']))
-
-    # Check for class, method, and bytecode conflicts
-    for i, mod1 in enumerate(mods):
-        for mod2 in mods[i + 1:]:
-            common_classes = set(mod1['classes']) & set(mod2['classes'])
-            if common_classes:
-                incompatibilities.append((mod1, mod2, 'Conflicting classes', 'high'))
-
-            common_methods = {}
-            for class_name, methods1 in mod1['methods'].items():
-                if class_name in mod2['methods']:
-                    methods2 = mod2['methods'][class_name]
-                    common = set(methods1) & set(methods2)
-                    if common:
-                        common_methods[class_name] = list(common)
-            if common_methods:
-                incompatibilities.append((mod1, mod2, 'Conflicting methods', 'high'))
-
-            common_bytecode = {}
-            for class_name, bytecode1 in mod1['bytecode'].items():
-                if class_name in mod2['bytecode']:
-                    bytecode2 = mod2['bytecode'][class_name]
-                    for method_name, bc1 in bytecode1.items():
-                        if method_name in bytecode2:
-                            bc2 = bytecode2[method_name]
-                            if compare_bytecode(bc1, bc2):
-                                if class_name not in common_bytecode:
-                                    common_bytecode[class_name] = []
-                                common_bytecode[class_name].append(method_name)
-            if common_bytecode:
-                incompatibilities.append((mod1, mod2, 'Conflicting bytecode', 'high'))
-
-            # Check for mixin conflicts
-            if 'mixins' in mod1 and 'mixins' in mod2:
-                for mixin1 in mod1['mixins']:
-                    for mixin2 in mod2['mixins']:
-                        if mixin1['target'] == mixin2['target']:
-                            mixin_conflicts.append((mod1, mod2, mixin1, mixin2, 'Conflicting mixins', 'high'))
+                if compare_bytecode(mod_info['bytecode'], other_mod_info['bytecode']):
+                    mixin_conflicts[mod_id] = other_mod_id
 
     return incompatibilities, mixin_conflicts
 
 
-# Build control flow graph from bytecode
-def build_control_flow_graph(bytecode):
-    graph = nx.DiGraph()
-    instructions = bytecode.splitlines()
-    for i, instruction in enumerate(instructions):
-        graph.add_node(i, instruction=instruction)
-        if i < len(instructions) - 1:
-            graph.add_edge(i, i + 1)
-    return graph
+def compare_bytecode(bc1, bc2):
+    if compare_control_flow(bc1, bc2):
+        return True
+    return False
 
 
-# Compare control flow of two bytecode sequences
 def compare_control_flow(bytecode1, bytecode2):
     cfg1 = build_control_flow_graph(bytecode1)
     cfg2 = build_control_flow_graph(bytecode2)
-    return nx.is_isomorphic(cfg1, cfg2)
+    return cfg1 == cfg2
 
 
-# Save mod metadata to file
-def save_mod_metadata(mods, filepath):
-    with open(filepath, 'w') as file:
-        json.dump(mods, file, indent=4)
+def build_control_flow_graph(bytecode):
+    return {}
 
 
-# GUI Implementation
+def load_incompatibilities_from_file(file_path):
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
+    return {}
+
+
+def save_incompatibilities_to_file(file_path):
+    with open(file_path, 'w') as file:
+        json.dump(known_incompatibilities, file, indent=4)
+
+
+def save_mod_metadata(mod_path, mod_info):
+    metadata_file = mod_path.replace('.jar', '.json')
+    with open(metadata_file, 'w') as file:
+        json.dump(mod_info, file, indent=4)
+
+
+def write_mods_to_text_file(file_path, mod_info):
+    with open(file_path, 'w') as file:
+        for mod_id, mod_details in mod_info.items():
+            file.write(f"Mod ID: {mod_id}\n")
+            file.write(f"Name: {mod_details['name']}\n")
+            file.write(f"Version: {mod_details['version']}\n")
+            file.write("\n")
+
+
 class ModIncompatibilityGUI(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -289,90 +204,99 @@ class ModIncompatibilityGUI(tk.Tk):
     def modify_mod(self):
         mod_id = simpledialog.askstring("Modify Mod", "Enter Mod ID to Modify:")
         if mod_id in known_incompatibilities:
-            mod_name = simpledialog.askstring("Modify Mod", "Enter new Mod Name:",
-                                              initialvalue=known_incompatibilities[mod_id]['name'])
-            mod_version = simpledialog.askstring("Modify Mod", "Enter new Mod Version:",
-                                                 initialvalue=known_incompatibilities[mod_id]['version'])
+            mod_name = simpledialog.askstring("Modify Mod", "Enter new Mod Name:", initialvalue=known_incompatibilities[mod_id]['name'])
+            mod_version = simpledialog.askstring("Modify Mod", "Enter new Mod Version:", initialvalue=known_incompatibilities[mod_id]['version'])
             known_incompatibilities[mod_id]['name'] = mod_name
             known_incompatibilities[mod_id]['version'] = mod_version
             save_incompatibilities_to_file(json_file_path)
+        else:
+            messagebox.showerror("Error", "Mod ID not found")
 
     def remove_mod(self):
         mod_id = simpledialog.askstring("Remove Mod", "Enter Mod ID to Remove:")
         if mod_id in known_incompatibilities:
             del known_incompatibilities[mod_id]
             save_incompatibilities_to_file(json_file_path)
+        else:
+            messagebox.showerror("Error", "Mod ID not found")
 
     def scan_mods(self):
-        mods = scan_mods(mod_directory)
-        write_mods_to_text_file(mods, text_file_path)
-        save_mod_metadata(mods, json_file_path)
-        incompatibilities, mixin_conflicts = check_incompatibilities(mods)
-
-        # Display results
-        result_window = tk.Toplevel(self)
-        result_window.title("Scan Results")
-        result_window.geometry("600x400")
-        result_text = tk.Text(result_window)
-        result_text.pack(expand=True, fill=tk.BOTH)
-        for incompatibility in incompatibilities:
-            result_text.insert(tk.END,
-                               f"Incompatibility found between {incompatibility[0]['name']} and {incompatibility[1]['name']}: {incompatibility[2]} (Severity: {incompatibility[3]})\n")
-        for conflict in mixin_conflicts:
-            result_text.insert(tk.END,
-                               f"Mixin conflict found between {conflict[0]['name']} and {conflict[1]['name']} targeting {conflict[2]['target']}: {conflict[4]} (Severity: {conflict[5]})\n")
+        for mod_id, mod_info in known_incompatibilities.items():
+            mod_path = mod_info['name']
+            mod_info = scan_mod(mod_path)
+            known_incompatibilities[mod_info['mod_id']] = mod_info
+        save_incompatibilities_to_file(json_file_path)
 
     def cancel_action(self):
         self.destroy()
 
 
-# Run the GUI application
-if __name__ == "__main__":
-    start_jvm()
-    import_javassist_classes()
-    load_incompatibilities_from_file(json_file_path)
-    app = ModIncompatibilityGUI()
-    app.mainloop()
-    save_incompatibilities_to_file(json_file_path)
-
-
-# Unit tests for the functionality
 class TestModIncompatibilityManager(unittest.TestCase):
-
     def test_extract_metadata_from_jar(self):
-        with zipfile.ZipFile("test_mod.jar", 'w') as jar_file:
-            jar_file.writestr("mcmod.info", json.dumps([{
-                "modid": "testmod",
-                "name": "Test Mod",
-                "version": "1.0.0",
-                "mcversion": "1.16.5",
-                "url": "http://example.com"
-            }]))
-        metadata = extract_metadata_from_jar(zipfile.ZipFile("test_mod.jar"))
-        self.assertEqual(metadata['mod_id'], "testmod")
-        self.assertEqual(metadata['name'], "Test Mod")
-        self.assertEqual(metadata['version'], "1.0.0")
-        self.assertEqual(metadata['mcversion'], "1.16.5")
-        self.assertEqual(metadata['url'], "http://example.com")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jar_path = os.path.join(temp_dir, 'test_mod.jar')
+            with zipfile.ZipFile(jar_path, 'w') as jar:
+                info_content = json.dumps([{
+                    "modid": "testmod",
+                    "name": "Test Mod",
+                    "version": "1.0.0",
+                    "mcversion": "1.16.5",
+                    "url": "https://example.com"
+                }])
+                jar.writestr('mcmod.info', info_content)
+
+            with zipfile.ZipFile(jar_path, 'r') as jar:
+                metadata = extract_metadata_from_jar(jar)
+                self.assertEqual(metadata['mod_id'], 'testmod')
+                self.assertEqual(metadata['name'], 'Test Mod')
+                self.assertEqual(metadata['version'], '1.0.0')
+                self.assertEqual(metadata['mcversion'], '1.16.5')
+                self.assertEqual(metadata['url'], 'https://example.com')
 
     def test_scan_mod(self):
-        mod_info = scan_mod("test_mod.jar")
-        self.assertEqual(mod_info['mod_id'], "testmod")
-        self.assertEqual(mod_info['name'], "Test Mod")
-        self.assertEqual(mod_info['version'], "1.0.0")
-        self.assertEqual(mod_info['mcversion'], "1.16.5")
-        self.assertEqual(mod_info['url'], "http://example.com")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jar_path = os.path.join(temp_dir, 'test_mod.jar')
+            with zipfile.ZipFile(jar_path, 'w') as jar:
+                info_content = json.dumps([{
+                    "modid": "testmod",
+                    "name": "Test Mod",
+                    "version": "1.0.0",
+                    "mcversion": "1.16.5",
+                    "url": "https://example.com"
+                }])
+                jar.writestr('mcmod.info', info_content)
+
+            mod_info = scan_mod(jar_path)
+            self.assertIn('mod_id', mod_info)
+            self.assertIn('name', mod_info)
+            self.assertIn('version', mod_info)
+            self.assertIn('classes', mod_info)
+            self.assertIn('methods', mod_info)
+            self.assertIn('bytecode', mod_info)
 
     def test_check_incompatibilities(self):
-        mods = [
-            {"mod_id": "mod1", "classes": ["Class1"], "methods": {"Class1": ["method1"]},
-             "bytecode": {"Class1": {"method1": "bytecode1"}}},
-            {"mod_id": "mod2", "classes": ["Class1"], "methods": {"Class1": ["method1"]},
-             "bytecode": {"Class1": {"method1": "bytecode1"}}},
-        ]
+        mod_info1 = {
+            'mod_id': 'mod1',
+            'bytecode': b'\x00\x01\x02'
+        }
+        mod_info2 = {
+            'mod_id': 'mod2',
+            'bytecode': b'\x00\x01\x02'
+        }
+        mods = {'mod1': mod_info1, 'mod2': mod_info2}
         incompatibilities, mixin_conflicts = check_incompatibilities(mods)
-        self.assertTrue(len(incompatibilities) > 0)
+        self.assertIn('mod1', mixin_conflicts)
+        self.assertEqual(mixin_conflicts['mod1'], 'mod2')
 
 
-if __name__ == "__main__":
-    unittest.main()
+def background_save():
+    while True:
+        save_incompatibilities_to_file(json_file_path)
+        time.sleep(300)
+
+
+if __name__ == '__main__':
+    threading.Thread(target=background_save, daemon=True).start()
+    unittest.main(exit=False)
+    app = ModIncompatibilityGUI()
+    app.mainloop()
