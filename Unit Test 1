@@ -1,0 +1,6 @@
+How to Use:
+Ensure the required JAR files (javassist.jar and json.jar) are placed in the Documents directory.
+Run the Python script.
+The script will compile and run the Java program, start the GUI, and run unit tests concurrently.
+Use the GUI to add, modify, remove, and scan mods. The results and conflicts will be displayed and saved as specified.
+This setup ensures a robust way to manage and check for mod incompatibilities, combining the power of Java for bytecode analysis and Python for GUI and testing.
