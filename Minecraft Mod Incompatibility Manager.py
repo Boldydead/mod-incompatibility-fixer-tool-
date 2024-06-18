@@ -17,7 +17,7 @@ import sys
 # Configure logging to file in the user's "Documents" directory
 documents_folder = os.path.join(os.path.expanduser("~"), "Documents")
 log_file_path = os.path.join(documents_folder, "mod_incompatibility_manager.log")
-logging.basicConfig(filename=log_file_path, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename=log_file_path, level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 
 conflicts_txt_file_path = os.path.join(documents_folder, "mod_conflicts.txt")
 
@@ -34,6 +34,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import java.nio.file.*;
 import java.util.stream.*;
+import java.util.Properties;
 
 public class ModScanner {
 
@@ -42,7 +43,12 @@ public class ModScanner {
         ZipFile jarFile = new ZipFile(jarPath);
         try {
             System.out.println("Processing JAR: " + jarPath);
+
+            boolean metadataFound = false;
+
+            // Check for mcmod.info
             if (jarFile.getEntry("mcmod.info") != null) {
+                metadataFound = true;
                 InputStream infoStream = jarFile.getInputStream(jarFile.getEntry("mcmod.info"));
                 BufferedReader reader = new BufferedReader(new InputStreamReader(infoStream));
                 StringBuilder jsonString = new StringBuilder();
@@ -57,8 +63,66 @@ public class ModScanner {
                 metadata.put("mod_id", modMetadata.getJSONObject(0).optString("modid", "Unknown"));
                 metadata.put("mcversion", modMetadata.getJSONObject(0).optString("mcversion", "Unknown"));
                 metadata.put("url", modMetadata.getJSONObject(0).optString("url", "Unknown"));
-            } else {
-                System.out.println("mcmod.info not found in " + jarPath);
+            }
+            // Check for fabric.mod.json
+            else if (jarFile.getEntry("fabric.mod.json") != null) {
+                metadataFound = true;
+                InputStream infoStream = jarFile.getInputStream(jarFile.getEntry("fabric.mod.json"));
+                BufferedReader reader = new BufferedReader(new InputStreamReader(infoStream));
+                StringBuilder jsonString = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    jsonString.append(line);
+                }
+                System.out.println("fabric.mod.json content: " + jsonString.toString());
+                JSONObject modMetadata = new JSONObject(jsonString.toString());
+                metadata.put("name", modMetadata.optString("name", "Unknown"));
+                metadata.put("version", modMetadata.optString("version", "Unknown"));
+                metadata.put("mod_id", modMetadata.optString("id", "Unknown"));
+                JSONArray depends = modMetadata.optJSONArray("depends");
+                if (depends != null) {
+                    JSONObject firstDependency = depends.optJSONObject(0);
+                    if (firstDependency != null) {
+                        metadata.put("mcversion", firstDependency.optString("version", "Unknown"));
+                    }
+                }
+                metadata.put("url", modMetadata.optString("contact", "Unknown"));
+            }
+            // Check for mods.toml
+            else if (jarFile.getEntry("META-INF/mods.toml") != null) {
+                metadataFound = true;
+                InputStream infoStream = jarFile.getInputStream(jarFile.getEntry("META-INF/mods.toml"));
+                BufferedReader reader = new BufferedReader(new InputStreamReader(infoStream));
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.startsWith("modid")) {
+                        metadata.put("mod_id", line.split("=")[1].trim());
+                    } else if (line.startsWith("version")) {
+                        metadata.put("version", line.split("=")[1].trim());
+                    } else if (line.startsWith("displayName")) {
+                        metadata.put("name", line.split("=")[1].trim());
+                    } else if (line.startsWith("displayURL")) {
+                        metadata.put("url", line.split("=")[1].trim());
+                    }
+                }
+                System.out.println("mods.toml content processed");
+            }
+            // Check for META-INF/MANIFEST.MF
+            else if (jarFile.getEntry("META-INF/MANIFEST.MF") != null) {
+                metadataFound = true;
+                InputStream infoStream = jarFile.getInputStream(jarFile.getEntry("META-INF/MANIFEST.MF"));
+                Properties props = new Properties();
+                props.load(infoStream);
+                metadata.put("name", props.getProperty("Implementation-Title", "Unknown"));
+                metadata.put("version", props.getProperty("Implementation-Version", "Unknown"));
+                metadata.put("mod_id", props.getProperty("Specification-Title", "Unknown"));
+                metadata.put("mcversion", props.getProperty("Specification-Version", "Unknown"));
+                metadata.put("url", props.getProperty("Implementation-Vendor-URL", "Unknown"));
+                System.out.println("MANIFEST.MF content processed");
+            }
+
+            if (!metadataFound) {
+                System.out.println("No known metadata files found in " + jarPath);
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -76,11 +140,11 @@ public class ModScanner {
                  .forEach(path -> {
                      try {
                          JSONObject metadata = extractMetadataFromJar(path.toString());
-                         if (metadata.length() > 0) {
+                         if (metadata.has("mod_id") && !metadata.getString("mod_id").equals("Unknown")) {
                              metadata.put("file", path.toString());
                              results.put(metadata);
                          } else {
-                             System.out.println("No metadata found for JAR: " + path.toString());
+                             System.out.println("No valid metadata found for JAR: " + path.toString());
                          }
                      } catch (Exception e) {
                          e.printStackTrace();
@@ -105,7 +169,6 @@ public class ModScanner {
 }
 """
 
-
 # Function to create ModScanner.java and compile it
 def create_and_compile_java():
     java_file_path = os.path.join(documents_folder, "ModScanner.java")
@@ -117,39 +180,26 @@ def create_and_compile_java():
     javassist_jar = os.path.join(documents_folder, "javassist.jar")
     json_jar = os.path.join(documents_folder, "json.jar")
 
-    # Print the paths for debugging
-    print(f"Expected path for javassist.jar: {javassist_jar}")
-    print(f"Expected path for json.jar: {json_jar}")
-
-    if not os.path.exists(javassist_jar) or not os.path.exists(json_jar):
-        raise FileNotFoundError("Required JAR files not found")
-
     compile_command = f"javac -cp .;{javassist_jar};{json_jar} -d {class_output_directory} {java_file_path}"
     subprocess.run(compile_command, shell=True, check=True)
-
 
 # Function to run the compiled Java program
 def scan_folder_with_java(folder_path, javassist_jar_path):
     java_classpath = f".;{javassist_jar_path};{documents_folder}/json.jar;{documents_folder}"
     run_command = ["java", "-cp", java_classpath, "ModScanner", folder_path]
     result = subprocess.run(run_command, capture_output=True, text=True)
-    print("Java execution stdout:", result.stdout)  # Print the stdout for debugging
-    print("Java execution stderr:", result.stderr)  # Print the stderr for debugging
 
     if result.returncode != 0:
         raise Exception(f"Java process failed: {result.stderr}")
 
-    # Read the JSON results from the file
     results_file_path = os.path.join(os.getcwd(), "scan_results.json")
     with open(results_file_path, 'r') as results_file:
         json_output = results_file.read().strip()
-        print("Java JSON output:", json_output)  # Print the JSON output for debugging
         try:
             return json.loads(json_output)
         except json.JSONDecodeError as e:
             print(f"JSON decoding error: {e}")
             return []
-
 
 def scan_mod_task(folder_path, javassist_jar_path):
     try:
@@ -159,11 +209,7 @@ def scan_mod_task(folder_path, javassist_jar_path):
         logging.error(f"Error in scan_mod_task: {e}")
         return []
 
-
 def check_incompatibilities(mods):
-    if not isinstance(mods, list) or not all(isinstance(mod, dict) for mod in mods):
-        raise ValueError("mods must be a list of dictionaries")
-
     incompatibilities = {}
     mixin_conflicts = {}
     class_conflicts = {}
@@ -175,39 +221,29 @@ def check_incompatibilities(mods):
                 other_mod_id = other_mod_info.get('mod_id')
                 if mod_id != other_mod_id:
                     if mod_info.get('mod_id') == other_mod_info.get('mod_id'):
-                        logging.info(f"Incompatibility found: {mod_id} is incompatible with {other_mod_id}")
                         incompatibilities.setdefault(mod_id, []).append(other_mod_id)
 
-                    # Check for class-level conflicts with detailed comparison
                     classes1 = mod_info.get('classes', [])
                     classes2 = other_mod_info.get('classes', [])
                     for cls in classes1:
                         if cls in classes2:
-                            logging.info(
-                                f"Class conflict found: {mod_id} has class conflict with {other_mod_id} on {cls}")
                             if compare_class_details(mod_info, other_mod_info, cls):
                                 class_conflicts.setdefault(mod_id, []).append(other_mod_id)
 
-                    # Check for mixin conflicts
                     bc1 = mod_info.get('bytecode', {})
                     bc2 = other_mod_info.get('bytecode', {})
                     if bc1 and bc2:
                         for file_name, bytecode1 in bc1.items():
                             bytecode2 = bc2.get(file_name)
                             if bytecode2 and compare_bytecode(bytecode1, bytecode2):
-                                logging.info(
-                                    f"Mixin conflict found: {mod_id} has mixin conflict with {other_mod_id} on {file_name}")
                                 mixin_conflicts.setdefault(mod_id, []).append(other_mod_id)
 
-    # Remove duplicates from conflicts
     class_conflicts = {k: list(set(v)) for k, v in class_conflicts.items()}
     mixin_conflicts = {k: list(set(v)) for k, v in mixin_conflicts.items()}
 
     return incompatibilities, class_conflicts, mixin_conflicts
 
-
 def compare_class_details(mod_info1, mod_info2, class_name):
-    """Compare detailed class structures including methods, fields, and control flow graphs."""
     methods1 = set(mod_info1['methods'][class_name])
     methods2 = set(mod_info2['methods'][class_name])
     fields1 = set(mod_info1['fields'][class_name])
@@ -216,7 +252,6 @@ def compare_class_details(mod_info1, mod_info2, class_name):
     cfg2 = mod_info2['cfg'][class_name]
 
     return methods1 == methods2 and fields1 == fields2 and cfg1 == cfg2
-
 
 def compare_bytecode(bc1, bc2):
     try:
@@ -228,10 +263,8 @@ def compare_bytecode(bc1, bc2):
         logging.error(f"Error comparing bytecode: {e}")
     return False
 
-
 def compare_control_flow(cfg1, cfg2):
     return cfg1 == cfg2
-
 
 def load_incompatibilities_from_file(file_path):
     if os.path.exists(file_path):
@@ -239,34 +272,36 @@ def load_incompatibilities_from_file(file_path):
             return json.load(file)
     return {}
 
-
 def save_incompatibilities_to_file(file_path):
     with open(file_path, 'w') as file:
         json.dump(known_incompatibilities, file, indent=4)
-
 
 def save_mod_metadata(mod_path, mod_info):
     metadata_file = mod_path.replace('.jar', '.json')
     with open(metadata_file, 'w') as file:
         json.dump(mod_info, file, indent=4)
 
-
 def write_conflicts_to_text_file(file_path, incompatibilities, class_conflicts, mixin_conflicts):
     with open(file_path, 'w') as file:
         file.write("Mod Conflict Summary:\n\n")
+
         if incompatibilities:
             file.write("Incompatibilities:\n")
             for mod, conflicts in incompatibilities.items():
-                file.write(f"{mod} conflicts with {', '.join(conflicts)}\n")
+                if conflicts:
+                    file.write(f"{mod} conflicts with {', '.join(conflicts)}\n")
+
         if class_conflicts:
             file.write("\nClass Conflicts:\n")
             for mod, conflicts in class_conflicts.items():
-                file.write(f"{mod} conflicts with {', '.join(conflicts)}\n")
+                if conflicts:
+                    file.write(f"{mod} conflicts with {', '.join(conflicts)}\n")
+
         if mixin_conflicts:
             file.write("\nMixin Conflicts:\n")
             for mod, conflicts in mixin_conflicts.items():
-                file.write(f"{mod} conflicts with {', '.join(conflicts)}\n")
-
+                if conflicts:
+                    file.write(f"{mod} conflicts with {', '.join(conflicts)}\n")
 
 class ModIncompatibilityGUI(tk.Tk):
     def __init__(self):
@@ -354,14 +389,20 @@ class ModIncompatibilityGUI(tk.Tk):
     def run_scan_mods(self):
         results = scan_mod_task(self.mc_directory, self.javassist_jar_path)
         for result in results:
-            self.mods[result['mod_id']] = result
+            if 'mod_id' in result:
+                self.mods[result['mod_id']] = result
+            else:
+                logging.error(f"Mod metadata missing 'mod_id': {result}")
         self.after(100, self.check_queue)
 
     def check_queue(self):
         try:
             while True:
                 result = self.queue.get_nowait()
-                self.mods[result['mod_id']] = result
+                if 'mod_id' in result:
+                    self.mods[result['mod_id']] = result
+                else:
+                    logging.error(f"Mod metadata missing 'mod_id': {result}")
         except Empty:
             pass
 
@@ -390,7 +431,6 @@ class ModIncompatibilityGUI(tk.Tk):
         if self.javassist_jar_path:
             messagebox.showinfo("Selected JAR", f"Javassist JAR Path: {self.javassist_jar_path}")
 
-
 class TestModIncompatibilityManager(unittest.TestCase):
     def test_extract_metadata_from_jar(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -405,14 +445,7 @@ class TestModIncompatibilityManager(unittest.TestCase):
                 }])
                 jar.writestr('mcmod.info', info_content)
 
-            # Print to verify JAR creation
-            with zipfile.ZipFile(jar_path, 'r') as jar:
-                print("Contents of test_mod.jar:", jar.namelist())
-                with jar.open('mcmod.info') as file:
-                    print("mcmod.info content:", file.read().decode('utf-8'))
-
             mod_info = scan_mod_task(temp_dir, documents_folder + '/javassist.jar')
-            print("Mod info:", mod_info)  # Print the mod info for debugging
             self.assertIsInstance(mod_info, list)
             self.assertGreater(len(mod_info), 0)
             self.assertIn('mod_id', mod_info[0])
@@ -453,21 +486,17 @@ class TestModIncompatibilityManager(unittest.TestCase):
             gui.choose_javassist_directory()
             self.assertEqual(gui.javassist_jar_path, '/fake/javassist.jar')
 
-
 def background_save():
     while True:
         save_incompatibilities_to_file(json_file_path)
         time.sleep(300)
 
-
 def run_tests():
     unittest.main(exit=False)
-
 
 def run_gui():
     app = ModIncompatibilityGUI()
     app.mainloop()
-
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == "test":
