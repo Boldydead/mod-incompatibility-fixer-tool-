@@ -4,3 +4,58 @@ Run the Python script.
 The script will compile and run the Java program, start the GUI, and run unit tests concurrently.
 Use the GUI to add, modify, remove, and scan mods. The results and conflicts will be displayed and saved as specified.
 This setup ensures a robust way to manage and check for mod incompatibilities, combining the power of Java for bytecode analysis and Python for GUI and testing.
+
+
+
+Purpose of the Changes:
+Command-Line Argument Check: The script now checks for a command-line argument "test". This determines whether the script should run the unit tests or start the GUI.
+Separate Execution Paths: By using this check, the script provides distinct pathways for running tests and for starting the GUI.
+How It Works:
+When Running the Script Normally:
+
+If you run the script without any arguments, it will start the GUI.
+Example:
+python script_name.py
+The GUI will remain active and allow you to interact with it for managing mod incompatibilities.
+When Running the Script with "test" Argument:
+
+If you run the script with the argument "test", it will execute the unit tests.
+Example:
+python script_name.py test
+This will run all the defined unit tests and print the results to the console.
+Code Breakdown:
+Main Block: The __main__ section now includes a check for the "test" argument:
+
+python
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        run_tests()
+    else:
+        threading.Thread(target=background_save, daemon=True).start()
+        run_gui()
+Running the GUI:
+
+When the script is run normally, it starts a background thread for saving incompatibilities periodically and then launches the GUI:
+python
+Copy code
+def run_gui():
+    app = ModIncompatibilityGUI()
+    app.mainloop()
+Running Unit Tests:
+
+When the script is run with the "test" argument, it executes the run_tests() function to run the unit tests:
+
+python
+def run_tests():
+    unittest.main(exit=False)
+
+
+Benefits:
+Separation of Concerns: It clearly separates the functionalities of the GUI and unit tests, preventing unintended behavior.
+Flexibility: You can easily choose to run the GUI or the unit tests based on your needs without modifying the script.
+
+
+Summary:
+Run the script normally to use the GUI: python script_name.py.
+Run the script with "test" to execute the unit tests: python script_name.py test.
+This structure ensures that the GUI remains active and tests are run only when explicitly requested.
