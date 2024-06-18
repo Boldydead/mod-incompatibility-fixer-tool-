@@ -12,6 +12,7 @@ import threading
 import time
 import base64
 import zipfile
+import sys
 
 # Configure logging to file in the user's "Documents" directory
 documents_folder = os.path.join(os.path.expanduser("~"), "Documents")
@@ -104,6 +105,7 @@ public class ModScanner {
 }
 """
 
+
 # Function to create ModScanner.java and compile it
 def create_and_compile_java():
     java_file_path = os.path.join(documents_folder, "ModScanner.java")
@@ -124,6 +126,7 @@ def create_and_compile_java():
 
     compile_command = f"javac -cp .;{javassist_jar};{json_jar} -d {class_output_directory} {java_file_path}"
     subprocess.run(compile_command, shell=True, check=True)
+
 
 # Function to run the compiled Java program
 def scan_folder_with_java(folder_path, javassist_jar_path):
@@ -147,6 +150,7 @@ def scan_folder_with_java(folder_path, javassist_jar_path):
             print(f"JSON decoding error: {e}")
             return []
 
+
 def scan_mod_task(folder_path, javassist_jar_path):
     try:
         results = scan_folder_with_java(folder_path, javassist_jar_path)
@@ -154,6 +158,7 @@ def scan_mod_task(folder_path, javassist_jar_path):
     except Exception as e:
         logging.error(f"Error in scan_mod_task: {e}")
         return []
+
 
 def check_incompatibilities(mods):
     if not isinstance(mods, list) or not all(isinstance(mod, dict) for mod in mods):
@@ -200,6 +205,7 @@ def check_incompatibilities(mods):
 
     return incompatibilities, class_conflicts, mixin_conflicts
 
+
 def compare_class_details(mod_info1, mod_info2, class_name):
     """Compare detailed class structures including methods, fields, and control flow graphs."""
     methods1 = set(mod_info1['methods'][class_name])
@@ -211,6 +217,7 @@ def compare_class_details(mod_info1, mod_info2, class_name):
 
     return methods1 == methods2 and fields1 == fields2 and cfg1 == cfg2
 
+
 def compare_bytecode(bc1, bc2):
     try:
         decoded_bc1 = base64.b64decode(bc1.encode('utf-8'))
@@ -221,8 +228,10 @@ def compare_bytecode(bc1, bc2):
         logging.error(f"Error comparing bytecode: {e}")
     return False
 
+
 def compare_control_flow(cfg1, cfg2):
     return cfg1 == cfg2
+
 
 def load_incompatibilities_from_file(file_path):
     if os.path.exists(file_path):
@@ -230,14 +239,17 @@ def load_incompatibilities_from_file(file_path):
             return json.load(file)
     return {}
 
+
 def save_incompatibilities_to_file(file_path):
     with open(file_path, 'w') as file:
         json.dump(known_incompatibilities, file, indent=4)
+
 
 def save_mod_metadata(mod_path, mod_info):
     metadata_file = mod_path.replace('.jar', '.json')
     with open(metadata_file, 'w') as file:
         json.dump(mod_info, file, indent=4)
+
 
 def write_conflicts_to_text_file(file_path, incompatibilities, class_conflicts, mixin_conflicts):
     with open(file_path, 'w') as file:
@@ -254,6 +266,7 @@ def write_conflicts_to_text_file(file_path, incompatibilities, class_conflicts, 
             file.write("\nMixin Conflicts:\n")
             for mod, conflicts in mixin_conflicts.items():
                 file.write(f"{mod} conflicts with {', '.join(conflicts)}\n")
+
 
 class ModIncompatibilityGUI(tk.Tk):
     def __init__(self):
@@ -377,6 +390,7 @@ class ModIncompatibilityGUI(tk.Tk):
         if self.javassist_jar_path:
             messagebox.showinfo("Selected JAR", f"Javassist JAR Path: {self.javassist_jar_path}")
 
+
 class TestModIncompatibilityManager(unittest.TestCase):
     def test_extract_metadata_from_jar(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -439,19 +453,25 @@ class TestModIncompatibilityManager(unittest.TestCase):
             gui.choose_javassist_directory()
             self.assertEqual(gui.javassist_jar_path, '/fake/javassist.jar')
 
+
 def background_save():
     while True:
         save_incompatibilities_to_file(json_file_path)
         time.sleep(300)
 
+
 def run_tests():
     unittest.main(exit=False)
+
 
 def run_gui():
     app = ModIncompatibilityGUI()
     app.mainloop()
 
+
 if __name__ == '__main__':
-    threading.Thread(target=background_save, daemon=True).start()
-    threading.Thread(target=run_tests).start()
-    run_gui()
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        run_tests()
+    else:
+        threading.Thread(target=background_save, daemon=True).start()
+        run_gui()
