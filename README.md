@@ -1,4 +1,4 @@
-                                                          AI Brain for Minecraft Mod Management
+                                                    AI Brain for Minecraft Mod Management
 Welcome to the AI Brain for Minecraft Mod Management! This project provides a sophisticated AI-driven solution to manage, analyze, and optimize Minecraft mods, ensuring compatibility and performance. 
 Below you'll find a comprehensive guide to understanding, setting up, and utilizing this system.
 
@@ -83,7 +83,7 @@ Prerequisites
 · Git
 
 1. Clone the Repository
-git clone https://github. com/yourusername/ai-brain-minecraft-mod-management.git
+git clone https://github. com/Boldydead/ai-brain-minecraft-mod-management.git
 cd ai-brain-minecraft-mod-management
 
 2. Create a Virtual Environment
