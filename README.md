@@ -1,6 +1,7 @@
-                                                                                     AI Brain for Minecraft Mod Management
+                                                                                  AI Brain for Minecraft Mod Management
 Welcome to the AI Brain for Minecraft Mod Management! This project provides a sophisticated AI-driven solution to manage, analyze, and optimize Minecraft mods, ensuring compatibility and performance. 
 Below you'll find a comprehensive guide to understanding, setting up, and utilizing this system.
+
 
 Table of Contents
 
@@ -18,6 +19,7 @@ Table of Contents
 
 7. Contact
 
+
 Features
 Mod Compatibility Analysis
 
@@ -34,11 +36,13 @@ Error Diagnosis and Troubleshooting
 . Suggests solutions, including changes to mod configuration files, different versions of
 identifying incom patible mods.
 
+
 Version Checking
 
 . Checks the version com patibility of Minecraft, Forge, and the mods being used.
 
 . Recom mends com patible versions if a mod is not com patible with the current setup.
+
 
 Automated Testing
 
@@ -53,6 +57,7 @@ Community Knowledge Integration
 . Pulls in solutions to com mon problems, recom mendations for mod com binations, and tips for
 mod configuration.
 
+
 Bytecode Analysis
 
 . Extracts features from bytecode for detailed analysis.
@@ -64,6 +69,7 @@ Built-in Code Fixer and Optimizer
 . Automatically suggests and applies fixes to mod code.
 
 · Optimizes performance based on provided data.
+
 
 Installation
 Prerequisites
@@ -94,6 +100,7 @@ Docker's official site.
 The project requires certain jar files for decom pilation and other tasks. Ensure these are
 downloaded as part of the setup process.
 
+
 Usage
 Running the Al Brain
 
@@ -103,6 +110,7 @@ directory.
 
 2. Run the AI Brain
 python ai_brain.py
+
 
 Example Script
 Here's an example script demonstrating the main functionalities:
