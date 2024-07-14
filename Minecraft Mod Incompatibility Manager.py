@@ -2,47 +2,303 @@ import ast
 import os
 import re
 import subprocess
-import zipfile
-import logging
-import concurrent.futures
-import shutil
-import asyncio
-import aiofiles
 import json
+from functools import lru_cache
+from typing import List
 import networkx as nx
 import requests
+from bs4 import BeautifulSoup
+from PIL import Image
+import openai
+import yaml
+import zipfile
+from pathlib import Path
+import shutil
+from concurrent.futures import ProcessPoolExecutor
+from pyqtgraph.examples.VideoSpeedTest import cache
+from ray.experimental.tf_utils import tf
+from scipy.stats import kurtosis, skew
+from tqdm import tqdm
+import logging
+import time
+import aiofiles
+import asyncio
+from collections import defaultdict
 import joblib
 import numpy as np
-import time
-from collections import defaultdict, deque
-from typing import List
-from bytecode import Bytecode, Instr
+import torch
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from sklearn.preprocessing import StandardScaler
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
-from prometheus_client import start_http_server, Summary, Gauge
+from sklearn.manifold import TSNE
+import plotly.express as px
 import docker
 import semantic_kernel as sk
-from functools import lru_cache
-from scipy.stats import skew, kurtosis, entropy as scipy_entropy
-import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping, LearningRateScheduler
+import concurrent.futures
+from prometheus_client import start_http_server, Summary, Gauge
+from bytecode import Bytecode, Instr
+from tensorflow.keras.callbacks import EarlyStopping, LearningRateScheduler, TensorBoard
 from tensorflow.keras.layers import Dense, BatchNormalization, Dropout, Input, Conv1D, GlobalAveragePooling1D, Attention
 from tensorflow.keras.models import Model
 from tensorflow.keras import regularizers
-import diskcache as dc
-
-# Define cache
-cache = dc.Cache('cache_directory')
+from transformers import pipeline
+import torch.nn as nn
+from ray import tune
+from ray.tune import CLIReporter
+from ray.tune.schedulers import ASHAScheduler
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 REQUEST_TIME = Summary('request_processing_seconds', 'Time spent processing request')
 MODEL_LOAD_TIME = Gauge('model_load_time_seconds', 'Time spent loading the model')
 
+openai.api_key = 'YOUR_OPENAI_API_KEY'
+MODS_DIR = r"C:\Users\jay5a\curseforge\minecraft\Instances\SimplePack 1\mods"
+TEMP_DIR = Path(MODS_DIR) / "temp"
+PROGUARD_JAR = Path(r"C:\Users\jay5a\Documents\proguard-7.5.0\lib\proguard.jar")
+JVM_ARGUMENTS = (
+    "-Xmx10G -Xms10G -XX:+UseG1GC -XX:MaxGCPauseMillis=50 "
+    "-XX:+UnlockExperimentalVMOptions -XX:+ParallelRefProcEnabled "
+    "-XX:+AlwaysPreTouch -XX:+DisableExplicitGC -XX:G1NewSizePercent=30 "
+    "-XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M "
+    "-XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 "
+    "-XX:G1MixedGCCountTarget=8 -XX:InitiatingHeapOccupancyPercent=15 "
+    "-XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 "
+    "-XX:SurvivorRatio=32 -XX:MaxTenuringThreshold=1 -Dsun.rmi.dgc.server.gcInterval=2147483646 "
+    "-Dsun.rmi.dgc.client.gcInterval=2147483646"
+)
+USER_SETTINGS = {
+    'max_workers': 8,
+    'yaml_extensions': ['.yaml', '.yml', '.cfg'],
+    'json_extensions': ['.json', '.cfg'],
+    'optimize_textures': True,
+    'remove_unused_textures': True,
+    'optimization_level': 3
+}
+
+
+class BytecodeDataset(torch.utils.data.Dataset):
+    def __init__(self, bytecodes, labels):
+        self.bytecodes = bytecodes
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.bytecodes)
+
+    def __getitem__(self, idx):
+        return torch.tensor(self.bytecodes[idx], dtype=torch.float32), self.labels[idx]
+
+
+class TransformerModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, nhead=8, num_layers=6):
+        super(TransformerModel, self).__init__()
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=input_dim, nhead=nhead)
+        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
+        self.fc = nn.Linear(input_dim, output_dim)
+
+    def forward(self, x):
+        x = self.transformer_encoder(x)
+        x = self.fc(x[:, -1, :])
+        return x
+
+
+class Autoencoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(Autoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(hidden_dim, int(hidden_dim / 2))
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(int(hidden_dim / 2), hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(hidden_dim, input_dim)
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
+
+    def encode(self, x):
+        return self.encoder(x)
+
 
 class BytecodeAnalyzer:
     def __init__(self):
-        self.logger = logging.getLogger(__name__)
+        self.logger = self.setup_logger()
+        self.transformer_model = self.create_transformer_model()
+        self.autoencoder = self.create_autoencoder()
+        self.bytecode_data = []
+
+    def setup_logger(self):
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.DEBUG)
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+        return logger
+
+    def create_transformer_model(self):
+        input_dim = 256
+        hidden_dim = 128
+        output_dim = 50
+        model = TransformerModel(input_dim, hidden_dim, output_dim)
+        self.logger.info("Transformer model created successfully.")
+        return model
+
+    def create_autoencoder(self):
+        input_dim = 256
+        hidden_dim = 128
+        model = Autoencoder(input_dim, hidden_dim)
+        self.logger.info("Autoencoder created successfully.")
+        return model
+
+    def train_model(self, model, dataloader, criterion, optimizer, scheduler, epochs=5):
+        model.train()
+        for epoch in range(epochs):
+            for data, _ in dataloader:
+                optimizer.zero_grad()
+                output = model(data)
+                loss = criterion(output, data)
+                loss.backward()
+                optimizer.step()
+            scheduler.step(loss)
+            self.logger.info(f"Epoch {epoch + 1}/{epochs}, Loss: {loss.item()}")
+
+    def hyperparameter_search(self, config, model_class, data, labels):
+        model = model_class(**config["model_params"])
+        optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
+        criterion = nn.MSELoss()
+        dataloader = torch.utils.data.DataLoader(BytecodeDataset(data, labels), batch_size=32, shuffle=True)
+
+        self.train_model(model, dataloader, criterion, optimizer, scheduler, epochs=config["epochs"])
+
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for val_data, _ in dataloader:
+                output = model(val_data)
+                loss = criterion(output, val_data)
+                val_loss += loss.item()
+        return val_loss
+
+    def optimize_hyperparameters(self, model_class, data, labels):
+        config = {
+            "model_params": {
+                "input_dim": 256,
+                "hidden_dim": tune.choice([128, 256]),
+                "output_dim": 50,
+                "nhead": tune.choice([4, 8]),
+                "num_layers": tune.choice([2, 4, 6])
+            },
+            "lr": tune.loguniform(1e-4, 1e-1),
+            "epochs": 5
+        }
+
+        scheduler = ASHAScheduler(
+            metric="val_loss",
+            mode="min",
+            max_t=10,
+            grace_period=1,
+            reduction_factor=2
+        )
+
+        reporter = CLIReporter(
+            metric_columns=["val_loss", "training_iteration"]
+        )
+
+        result = tune.run(
+            tune.with_parameters(self.hyperparameter_search, model_class=model_class, data=data, labels=labels),
+            resources_per_trial={"cpu": 1, "gpu": 0},
+            config=config,
+            num_samples=10,
+            scheduler=scheduler,
+            progress_reporter=reporter
+        )
+
+        best_trial = result.get_best_trial("val_loss", "min", "last")
+        self.logger.info(f"Best trial config: {best_trial.config}")
+        return best_trial.config
+
+    def train_initial_models(self, bytecodes, labels):
+        best_transformer_config = self.optimize_hyperparameters(TransformerModel, bytecodes, labels)
+        best_autoencoder_config = self.optimize_hyperparameters(Autoencoder, bytecodes, labels)
+
+        self.transformer_model = TransformerModel(**best_transformer_config["model_params"])
+        self.autoencoder = Autoencoder(**best_autoencoder_config["model_params"])
+
+        dataset = BytecodeDataset(bytecodes, labels)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+
+        transformer_optimizer = torch.optim.Adam(self.transformer_model.parameters(), lr=best_transformer_config["lr"])
+        autoencoder_optimizer = torch.optim.Adam(self.autoencoder.parameters(), lr=best_autoencoder_config["lr"])
+
+        criterion = nn.MSELoss()
+
+        self.logger.info("Training Transformer model...")
+        self.train_model(self.transformer_model, dataloader, criterion, transformer_optimizer, None,
+                         epochs=best_transformer_config["epochs"])
+
+        self.logger.info("Training Autoencoder model...")
+        self.train_model(self.autoencoder, dataloader, criterion, autoencoder_optimizer, None,
+                         epochs=best_autoencoder_config["epochs"])
+
+    async def analyze_bytecode(self, bytecode):
+        try:
+            bytecode_tensor = torch.tensor(bytecode, dtype=torch.float32).unsqueeze(0)
+            features = self.transformer_model(bytecode_tensor)
+            reduced_features = self.autoencoder.encode(features)
+            self.logger.info("Bytecode analyzed successfully.")
+            return reduced_features
+        except Exception as e:
+            self.logger.error(f"Error analyzing bytecode: {e}")
+            raise
+
+    def add_bytecode_data(self, bytecode):
+        try:
+            self.bytecode_data.append(bytecode)
+            self.logger.info("Bytecode data added successfully.")
+        except Exception as e:
+            self.logger.error(f"Error adding bytecode data: {e}")
+            raise
+
+    async def process_all_bytecode(self):
+        tasks = [self.analyze_bytecode(bytecode) for bytecode in self.bytecode_data]
+        results = await asyncio.gather(*tasks)
+        self.logger.info("All bytecode data processed successfully.")
+        return results
+
+    def visualize_features(self, features):
+        try:
+            features_np = torch.stack(features).detach().numpy()
+            tsne = TSNE(n_components=2, random_state=42)
+            features_2d = tsne.fit_transform(features_np)
+            fig = px.scatter(x=features_2d[:, 0], y=features_2d[:, 1], title="t-SNE Visualization of Bytecode Features")
+            fig.show()
+            self.logger.info("Features visualized successfully.")
+        except Exception as e:
+            self.logger.error(f"Error visualizing features: {e}")
+            raise
+
+    def update_model_with_new_data(self, new_bytecodes, new_labels):
+        self.logger.info("Updating models with new data...")
+        dataset = BytecodeDataset(new_bytecodes, new_labels)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+
+        transformer_optimizer = torch.optim.Adam(self.transformer_model.parameters(), lr=0.001)
+        autoencoder_optimizer = torch.optim.Adam(self.autoencoder.parameters(), lr=0.001)
+
+        criterion = nn.MSELoss()
+
+        self.logger.info("Updating Transformer model...")
+        self.train_model(self.transformer_model, dataloader, criterion, transformer_optimizer, None, epochs=3)
+
+        self.logger.info("Updating Autoencoder model...")
+        self.train_model(self.autoencoder, dataloader, criterion, autoencoder_optimizer, None, epochs=3)
 
     def extract_features(self, bytecode):
         features = []
@@ -94,7 +350,28 @@ class BytecodeAnalyzer:
         opcode_seq.extend([0] * (500 - len(opcode_seq)))  # Pad sequence if less than 500
         features.extend(opcode_seq)
 
+        # Automated Pattern Recognition
+        pattern_recognition_features = self.automated_pattern_recognition(bytecode)
+        features.extend(pattern_recognition_features)
+
+        # Dynamic Opcode Analysis
+        dynamic_opcode_features = self.dynamic_opcode_analysis(bytecode)
+        features.extend(dynamic_opcode_features)
+
         return features
+
+    def automated_pattern_recognition(self, bytecode):
+        bytecode_tensor = torch.tensor(bytecode, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            pattern_features = self.transformer_model(bytecode_tensor).squeeze().numpy()
+        return pattern_features
+
+    def dynamic_opcode_analysis(self, bytecode):
+        opcode_set = set(bytecode)
+        dynamic_features = [len(opcode_set)]  # Number of unique opcodes
+        dynamic_features.extend(list(opcode_set)[:50])  # First 50 unique opcodes as features
+        dynamic_features.extend([0] * (50 - len(dynamic_features)))  # Pad if less than 50
+        return dynamic_features
 
     def calculate_halstead_metrics(self, bytecode):
         operators = set()
@@ -104,7 +381,7 @@ class BytecodeAnalyzer:
 
         for instr in bytecode:
             if isinstance(instr, Instr):
-                if instr.name.isupper():  # Simplified heuristic: assume upper case names are operators
+                if instr.name.isupper():
                     operators.add(instr.name)
                     operator_count += 1
                 else:
@@ -119,7 +396,7 @@ class BytecodeAnalyzer:
         N = N1 + N2
 
         if n1 == 0 or n2 == 0:
-            return [0] * 7  # Avoid division by zero
+            return [0] * 7
 
         vocabulary = n1 + n2
         length = N1 + N2
@@ -146,10 +423,10 @@ class BytecodeAnalyzer:
     def analyze_control_flow_graph(self, bytecode):
         cfg = self.construct_cfg(bytecode)
         features = [
-            cfg.number_of_nodes(),  # Number of nodes
-            cfg.number_of_edges(),  # Number of edges
-            nx.number_strongly_connected_components(cfg),  # Strongly connected components
-            nx.algorithms.cycles.cycle_basis(cfg),  # Cyclomatic complexity
+            cfg.number_of_nodes(),
+            cfg.number_of_edges(),
+            nx.number_strongly_connected_components(cfg),
+            len(nx.algorithms.cycles.cycle_basis(cfg)),
         ]
         return features
 
@@ -171,9 +448,9 @@ class BytecodeAnalyzer:
                     target = instr.arg
                     reaching_defs.clear()
         features = [
-            len(def_use_chains),  # Number of def-use chains
-            len(live_vars),  # Number of live variables
-            len(reaching_defs),  # Number of reaching definitions
+            len(def_use_chains),
+            len(live_vars),
+            len(reaching_defs),
         ]
         return features
 
@@ -192,9 +469,9 @@ class BytecodeAnalyzer:
     def analyze_call_graph(self, bytecode):
         call_graph = self.construct_call_graph(bytecode)
         features = [
-            call_graph.number_of_nodes(),  # Number of nodes (methods)
-            call_graph.number_of_edges(),  # Number of edges (method calls)
-            nx.number_strongly_connected_components(call_graph),  # Strongly connected components
+            call_graph.number_of_nodes(),
+            call_graph.number_of_edges(),
+            nx.number_strongly_connected_components(call_graph),
         ]
         return features
 
@@ -204,6 +481,506 @@ class BytecodeAnalyzer:
         features.extend(self.analyze_data_flow(bytecode))
         features.extend(self.analyze_call_graph(bytecode))
         return features
+
+
+class ForgeModFixHelper:
+    def __init__(self, mod_directory):
+        self.mod_directory = mod_directory
+
+    def run_checkstyle(self, file_path):
+        """
+        Run Checkstyle on the given Java file.
+        """
+        checkstyle_command = f"java -jar checkstyle-10.0-all.jar -c /google_checks.xml {file_path}"
+        result = subprocess.run(checkstyle_command, shell=True, capture_output=True, text=True)
+        return result.stdout if result.returncode == 0 else result.stderr
+
+    def run_pmd(self, file_path):
+        """
+        Run PMD on the given Java file.
+        """
+        pmd_command = f"pmd -d {file_path} -f text -R java-basic,java-unusedcode"
+        result = subprocess.run(pmd_command, shell=True, capture_output=True, text=True)
+        return result.stdout if result.returncode == 0 else result.stderr
+
+    def analyze_java_code(self, file_path):
+        """
+        Perform static analysis to identify syntax and logical errors in Java code using Checkstyle and PMD.
+        """
+        errors = []
+
+        # Run Checkstyle
+        checkstyle_output = self.run_checkstyle(file_path)
+        if checkstyle_output:
+            errors.append(f"Checkstyle Issues:\n{checkstyle_output}")
+
+        # Run PMD
+        pmd_output = self.run_pmd(file_path)
+        if pmd_output:
+            errors.append(f"PMD Issues:\n{pmd_output}")
+
+        return errors
+
+    def detect_java_bugs(self, code):
+        """
+        Use AI to find common patterns in bugs.
+        """
+        response = openai.Completion.create(
+            engine="davinci-codex",
+            prompt=f"Analyze the following Minecraft Forge mod Java code for bugs and suggest fixes:\n\n{code}\n\nBugs:",
+            max_tokens=150
+        )
+        return response.choices[0].text.strip()
+
+    def suggest_java_fixes(self, code):
+        """
+        Use AI to suggest and apply fixes to the Java code.
+        """
+        response = openai.Completion.create(
+            engine="davinci-codex",
+            prompt=f"Suggest fixes for the following Minecraft Forge mod Java code:\n\n{code}\n\nFixes:",
+            max_tokens=150
+        )
+        return response.choices[0].text.strip()
+
+    def analyze_json_file(self, file_path):
+        """
+        Analyze JSON files for common issues.
+        """
+        errors = []
+        with open(file_path, 'r') as file:
+            try:
+                data = json.load(file)
+                # Perform checks on JSON structure and content
+                if "parent" in data and not data["parent"]:
+                    errors.append("Error: 'parent' field in JSON should not be empty.")
+                if "textures" in data:
+                    if not isinstance(data["textures"], dict):
+                        errors.append("Error: 'textures' field should be a dictionary.")
+            except json.JSONDecodeError as e:
+                errors.append(f"JSON error: {e}")
+
+        return errors
+
+    def analyze_texture_file(self, file_path):
+        """
+        Analyze texture files for issues such as format, dimensions, and other properties.
+        """
+        errors = []
+        try:
+            with Image.open(file_path) as img:
+                # Check image format
+                if img.format != 'PNG':
+                    errors.append(f"Texture format error: Expected PNG, got {img.format}.")
+
+                # Check image dimensions (e.g., Minecraft textures typically use 16x16, 32x32, etc.)
+                if img.width != img.height:
+                    errors.append(f"Texture dimension error: Expected square texture, got {img.width}x{img.height}.")
+
+                if img.width not in [16, 32, 64, 128, 256, 512, 1024]:
+                    errors.append(f"Texture size error: Unexpected texture size {img.width}x{img.height}.")
+
+        except IOError as e:
+            errors.append(f"Texture file error: {e}")
+
+        return errors
+
+    def analyze_registration_list(self, code):
+        """
+        Analyze the list used to register items and blocks.
+        """
+        errors = []
+        if "Registry.register" not in code:
+            errors.append("Possible issue: Registry registration missing or incorrect.")
+        return errors
+
+    def analyze_min_version(self, code):
+        """
+        Analyze the minimum version specification in the Java code.
+        """
+        errors = []
+        if "@Mod" in code:
+            match = re.search(r'minecraftVersion\s*=\s*\"([^\"]+)\"', code)
+            if match:
+                version = match.group(1)
+                if not re.match(r'\d+\.\d+\.\d+', version):
+                    errors.append(f"Version format error: {version} does not match x.x.x pattern.")
+        return errors
+
+    def process_java_file(self, file_path):
+        with open(file_path, 'r') as file:
+            code = file.read()
+
+        print(f"Analyzing {file_path}...")
+        errors = self.analyze_java_code(file_path)
+        if errors:
+            print("Static Analysis Issues found:")
+            for error in errors:
+                print(error)
+        else:
+            print("No static analysis issues found.")
+
+        registration_errors = self.analyze_registration_list(code)
+        if registration_errors:
+            print("Registration Issues found:")
+            for error in registration_errors:
+                print(error)
+
+        version_errors = self.analyze_min_version(code)
+        if version_errors:
+            print("Version Specification Issues found:")
+            for error in version_errors:
+                print(error)
+
+        print("\nDetecting bugs...")
+        bugs = self.detect_java_bugs(code)
+        print("Bugs detected:")
+        print(bugs)
+
+        print("\nSuggesting fixes...")
+        fixes = self.suggest_java_fixes(code)
+        print("Fixes suggested:")
+        print(fixes)
+
+        print("\nApplying fixes...")
+        fixed_code = self.apply_fixes(code, fixes)
+
+        with open(file_path, 'w') as file:
+            file.write(fixed_code)
+
+        print(f"Fixes applied and code formatted. File saved: {file_path}")
+
+    def apply_fixes(self, code, fixes):
+        """
+        Apply the suggested fixes to the code.
+        """
+        fixed_code = code
+        for fix in fixes.split('\n'):
+            if '->' in fix:
+                pattern = re.escape(fix.split(' -> ')[0].strip())
+                replacement = fix.split(' -> ')[1].strip()
+                fixed_code = re.sub(pattern, replacement, fixed_code)
+        return fixed_code
+
+    def process_mod_directory(self):
+        for root, _, files in os.walk(self.mod_directory):
+            for file in files:
+                file_path = os.path.join(root, file)
+                if file.endswith('.java'):
+                    self.process_java_file(file_path)
+                elif file.endswith('.json'):
+                    print(f"Analyzing JSON file: {file_path}")
+                    errors = self.analyze_json_file(file_path)
+                    if errors:
+                        print("Errors found in JSON file:")
+                        for error in errors:
+                            print(error)
+                elif file.endswith('.png'):
+                    print(f"Analyzing texture file: {file_path}")
+                    errors = self.analyze_texture_file(file_path)
+                    if errors:
+                        print("Errors found in texture file:")
+                        for error in errors:
+                            print(error)
+
+    def get_latest_mod_version(self, mod_name):
+        """
+        Get the latest version download link of a mod from CurseForge.
+        """
+        search_url = f"https://www.curseforge.com/minecraft/mc-mods/search?search={mod_name}"
+        response = requests.get(search_url)
+        if response.status_code != 200:
+            print(f"Failed to retrieve mod info for {mod_name}")
+            return None
+
+        soup = BeautifulSoup(response.content, "html.parser")
+        mod_page = soup.find("a", class_="flex items-center")
+        if not mod_page:
+            print(f"Failed to find mod page for {mod_name}")
+            return None
+
+        mod_page_url = "https://www.curseforge.com" + mod_page["href"]
+        response = requests.get(mod_page_url + "/files")
+        if response.status_code != 200:
+            print(f"Failed to retrieve files page for {mod_name}")
+            return None
+
+        soup = BeautifulSoup(response.content, "html.parser")
+        download_link = soup.find("a", {"data-action": "FileDownload"})
+        if download_link:
+            return "https://www.curseforge.com" + download_link["href"]
+        else:
+            print(f"Failed to find download link for {mod_name}")
+            return None
+
+    def download_file(self, url, dest_path):
+        """
+        Download a file from a URL.
+        """
+        response = requests.get(url, stream=True)
+        if response.status_code == 200:
+            with open(dest_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        else:
+            print(f"Failed to download file from {url}")
+
+    def extract_mod_name(self, filename):
+        """
+        Extract mod name from filename.
+        """
+        mod_name = filename
+        if '-' in mod_name:
+            mod_name = mod_name.split('-')[0]
+        if '_' in mod_name:
+            mod_name = mod_name.split('_')[0]
+        if '.' in mod_name:
+            mod_name = mod_name.split('.')[0]
+        return mod_name
+
+    def update_mods(self):
+        """
+        Update all mods in the mods directory.
+        """
+        for filename in os.listdir(self.mod_directory):
+            if filename.endswith(".jar"):
+                mod_name = self.extract_mod_name(filename)
+                print(f"Checking for updates for mod: {mod_name}")
+                latest_version_url = self.get_latest_mod_version(mod_name)
+                if latest_version_url:
+                    new_mod_path = os.path.join(self.mod_directory, "temp_mod.jar")
+                    self.download_file(latest_version_url, new_mod_path)
+
+                    # Replace old mod with the new one
+                    old_mod_path = os.path.join(self.mod_directory, filename)
+                    os.remove(old_mod_path)
+                    os.rename(new_mod_path, old_mod_path)
+                    print(f"Updated {mod_name} to the latest version.")
+                else:
+                    print(f"No updates found for {mod_name}")
+
+    def preprocess_file(self, file_path):
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
+            content = content.replace('\t', '    ')
+            with open(file_path, 'w', encoding='utf-8') as file:
+                file.write(content)
+        except Exception as e:
+            logging.error(f"Error preprocessing file {file_path}: {e}")
+
+    def detect_and_load_config(self, config_file):
+        self.preprocess_file(config_file)
+        with open(config_file, 'r', encoding='utf-8') as file:
+            content = file.read()
+
+        try:
+            config = yaml.safe_load(content)
+            if isinstance(config, dict):
+                return config
+        except yaml.YAMLError:
+            pass
+
+        try:
+            config = json.loads(content)
+            if isinstance(config, dict):
+                return config
+        except json.JSONDecodeError:
+            pass
+
+        return None
+
+    def optimize_mod_configs(self, mod_dir):
+        config_dir = Path(mod_dir) / "config"
+        if not config_dir.exists():
+            logging.info(f"No config directory found in {mod_dir.name}")
+            return
+
+        start_time = time.time()
+        config_files = list(config_dir.rglob('*.*'))
+        if not config_files:
+            logging.info(f"No config files found in {mod_dir.name}")
+            return
+
+        for config_file in tqdm(config_files, desc=f"Optimizing mod configs in {mod_dir.name}"):
+            if config_file.suffix in USER_SETTINGS['yaml_extensions'] + USER_SETTINGS['json_extensions']:
+                config = self.detect_and_load_config(config_file)
+                if config:
+                    self.optimize_config(config)
+                    with open(config_file, 'w', encoding='utf-8') as file:
+                        yaml.safe_dump(config, file)
+                    logging.info(f"Optimized {config_file}")
+                else:
+                    logging.warning(f"Skipping {config_file} as it is not a valid YAML or JSON dictionary.")
+        end_time = time.time()
+        logging.info(f"Mod config optimization for {mod_dir.name} completed in {end_time - start_time:.2f} seconds")
+
+    def optimize_config(self, config):
+        if isinstance(config, dict):
+            for key, value in config.items():
+                if isinstance(value, dict):
+                    self.optimize_config(value)
+                elif 'debug' in key:
+                    config[key] = False
+                elif 'cache' in key:
+                    config[key] = True
+        elif isinstance(config, list):
+            for item in config:
+                self.optimize_config(item)
+
+    def analyze_mod_for_textures(self, mod_dir):
+        referenced_textures = set()
+        start_time = time.time()
+
+        config_dir = Path(mod_dir) / "config"
+        for config_file in config_dir.rglob('*.*'):
+            if config_file.suffix in USER_SETTINGS['yaml_extensions'] + USER_SETTINGS['json_extensions']:
+                config = self.detect_and_load_config(config_file)
+                if config:
+                    self.find_textures_in_config(config, referenced_textures)
+                else:
+                    logging.warning(f"Error analyzing {config_file}: Not a valid YAML or JSON dictionary.")
+
+        for mod_file in config_dir.rglob('*.*'):
+            if mod_file.suffix in USER_SETTINGS['json_extensions']:
+                try:
+                    with open(mod_file, 'r', encoding='utf-8') as file:
+                        data = json.load(file)
+                        self.find_textures_in_json(data, referenced_textures)
+                except Exception as e:
+                    logging.error(f"Error analyzing {mod_file}: {e}")
+
+        end_time = time.time()
+        logging.info(f"Texture analysis for {mod_dir.name} completed in {end_time - start_time:.2f} seconds")
+
+        return referenced_textures
+
+    def find_textures_in_config(self, config, referenced_textures):
+        if isinstance(config, dict):
+            for key, value in config.items():
+                if isinstance(value, str) and value.endswith('.png'):
+                    referenced_textures.add(value)
+                else:
+                    self.find_textures_in_config(value, referenced_textures)
+        elif isinstance(config, list):
+            for item in config:
+                self.find_textures_in_config(item, referenced_textures)
+
+    def find_textures_in_json(self, data, referenced_textures):
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, str) and value.endswith('.png'):
+                    referenced_textures.add(value)
+                else:
+                    self.find_textures_in_json(value, referenced_textures)
+        elif isinstance(data, list):
+            for item in data:
+                self.find_textures_in_json(item, referenced_textures)
+
+    def optimize_mod_textures(self, mod_dir, referenced_textures):
+        textures_dir = Path(mod_dir) / "assets" / "minecraft" / "textures"
+        if textures_dir.exists():
+            for texture_file in textures_dir.rglob("*.png"):
+                relative_path = texture_file.relative_to(mod_dir).as_posix()
+                if USER_SETTINGS['remove_unused_textures'] and relative_path not in referenced_textures:
+                    try:
+                        texture_file.unlink()
+                        logging.info(f"Removed unused texture {relative_path}")
+                    except Exception as e:
+                        logging.error(f"Error removing texture {relative_path}: {e}")
+
+    def optimize_bytecode(self, jar_path):
+        optimized_jar_path = TEMP_DIR / jar_path.name
+        proguard_config = f"""
+        -injars {jar_path}
+        -outjars {optimized_jar_path}
+        -libraryjars <java.home>/lib/rt.jar
+        -dontwarn
+        -dontoptimize
+        -dontobfuscate
+        -keep public class * {{
+            public static void main(java.lang.String[]);
+        }}
+        """
+        config_file = TEMP_DIR / "proguard.pro"
+        with open(config_file, 'w') as file:
+            file.write(proguard_config)
+
+        command = f"java -jar {PROGUARD_JAR} @proguard.pro"
+        subprocess.run(command, cwd=TEMP_DIR, shell=True)
+
+        return optimized_jar_path
+
+    def optimize_jar_mod(self, jar_path):
+        mod_dir = TEMP_DIR / jar_path.stem
+        mod_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with zipfile.ZipFile(jar_path, 'r') as jar_file:
+                jar_file.extractall(mod_dir)
+
+            logging.info(f"Starting optimization for {jar_path.name}")
+            referenced_textures = self.analyze_mod_for_textures(mod_dir)
+            self.optimize_mod_configs(mod_dir)
+            if USER_SETTINGS['optimize_textures']:
+                self.optimize_mod_textures(mod_dir, referenced_textures)
+            logging.info(f"Completed optimization for {jar_path.name}")
+
+            optimized_jar_path = self.optimize_bytecode(jar_path)
+
+            shutil.move(str(optimized_jar_path), str(jar_path))
+
+        except Exception as e:
+            logging.error(f"Error optimizing {jar_path}: {e}")
+        finally:
+            shutil.rmtree(mod_dir)
+
+    def set_jvm_arguments(self):
+        try:
+            launch_script = Path(self.mod_directory).parent / "launch.bat"
+            with open(launch_script, 'w', encoding='utf-8') as file:
+                file.write(f"@echo off\njava {JVM_ARGUMENTS} -jar forge.jar\n")
+            logging.info("Set JVM arguments in launch.bat")
+        except Exception as e:
+            logging.error(f"Error setting JVM arguments: {e}")
+
+    def create_backup(self):
+        backup_dir = Path(self.mod_directory).parent / "backup"
+        if not backup_dir.exists():
+            backup_dir.mkdir()
+        backup_file = backup_dir / f"backup_{int(time.time())}.zip"
+        with zipfile.ZipFile(backup_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(self.mod_directory):
+                for file in files:
+                    file_path = Path(root) / file
+                    arcname = file_path.relative_to(self.mod_directory)
+                    zipf.write(file_path, arcname)
+        logging.info(f"Backup created at {backup_file}")
+
+    def main(self):
+        logging.info("Starting mods optimization")
+        self.create_backup()
+
+        if TEMP_DIR.exists():
+            shutil.rmtree(TEMP_DIR)
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+        logging.info(f"Contents of {self.mod_directory}: {os.listdir(self.mod_directory)}")
+
+        jar_files = list(Path(self.mod_directory).glob("*.jar"))
+
+        logging.info(f"Number of .jar files found: {len(jar_files)}")
+
+        if not jar_files:
+            logging.info("No .jar files found for optimization.")
+            return
+
+        with ProcessPoolExecutor(max_workers=USER_SETTINGS['max_workers']) as executor:
+            list(tqdm(executor.map(self.optimize_jar_mod, jar_files), total=len(jar_files), desc="Optimizing mods"))
+
+        self.set_jvm_arguments()
+        self.update_mods()
+        logging.info("Mods optimization complete!")
 
 
 class AIBrain:
@@ -223,6 +1000,7 @@ class AIBrain:
         self.docker_client = self.initialize_docker_client()  # Initialize Docker client
         self._initialize_models()
         self.bytecode_analyzer = BytecodeAnalyzer()  # Initialize BytecodeAnalyzer
+        self.forge_mod_helper = ForgeModFixHelper(mod_directory)  # Initialize ForgeModFixHelper
         start_http_server(8000)  # Start Prometheus metrics server
 
     def initialize_docker_client(self):
@@ -357,7 +1135,7 @@ class AIBrain:
             for file in files:
                 file_path = os.path.join(root, file)
                 if file.endswith('.java'):
-                    conflicts = self.analyze_java_file(file_path)
+                    conflicts = self.forge_mod_helper.analyze_java_code(file_path)
                     if conflicts:
                         await self.fix_file(file_path)
                 elif file.endswith('.py'):
@@ -367,7 +1145,7 @@ class AIBrain:
                 elif file.endswith('.class'):
                     decompiled_file_path = await self.decompile_class_file(file_path)
                     if decompiled_file_path:
-                        conflicts = self.analyze_java_file(decompiled_file_path)
+                        conflicts = self.forge_mod_helper.analyze_java_code(decompiled_file_path)
                         if conflicts:
                             await self.fix_file(decompiled_file_path)
 
@@ -390,15 +1168,6 @@ class AIBrain:
                     if isinstance(node, ast.Raise) and any(arg.s == 'Error' for arg in node.args):
                         conflicts.append(file_path)
             except SyntaxError:
-                conflicts.append(file_path)
-        return conflicts
-
-    def analyze_java_file(self, file_path: str) -> List[str]:
-        conflicts = []
-        error_pattern = re.compile(r'throw\s+new\s+Error')
-        with open(file_path, 'r', encoding='utf-8') as file:
-            content = file.read()
-            if error_pattern.search(content):
                 conflicts.append(file_path)
         return conflicts
 
@@ -480,51 +1249,16 @@ class AIBrain:
         else:
             logging.error(f"Error in decompilation: {result.stderr}")
 
-    def extract_features(self, bytecode):
-        features = []
-        byte_freq = np.zeros(256)
-        for byte in bytecode:
-            byte_freq[byte] += 1
-        features.extend(byte_freq)
-        features.append(len(bytecode))
-        n = 2
-        bi_grams = [bytecode[i:i + n] for i in range(len(bytecode) - n + 1)]
-        bi_gram_freq = np.zeros(256 ** n)
-        for bi_gram in bi_grams:
-            index = bi_gram[0] * 256 + bi_gram[1]
-            bi_gram_freq[index] += 1
-        features.extend(bi_gram_freq)
-        n = 3
-        tri_grams = [bytecode[i:i + n] for i in range(len(bytecode) - n + 1)]
-        tri_gram_freq = np.zeros(256 ** n)
-        for tri_gram in tri_grams:
-            index = tri_gram[0] * 256 ** 2 + tri_gram[1] * 256 + tri_gram[2]
-            tri_gram_freq[index] += 1
-        features.extend(tri_gram_freq)
-        byte_probs = byte_freq / len(bytecode)
-        entropy = -np.sum(byte_probs * np.log2(byte_probs + 1e-9))
-        features.append(entropy)
-        mean = np.mean(bytecode)
-        variance = np.var(bytecode)
-        std_dev = np.std(bytecode)
-        skewness = skew(bytecode)
-        kurt = kurtosis(bytecode)
-        features.extend([mean, variance, std_dev, skewness, kurt])
-        halstead_metrics = self.calculate_halstead_metrics(bytecode)
-        features.extend(halstead_metrics)
-        return features
-
-    def calculate_halstead_metrics(self, bytecode):
-        n1 = len(set(bytecode))
-        n2 = len(bytecode)
-        N1 = len(bytecode)
-        N2 = len(bytecode)
-        N = N1 + N2
-        n = n1 + n2
-        V = N * np.log2(n) if n != 0 else 0
-        D = (n1 / 2) * (N2 / n2) if n2 != 0 else 0
-        E = D * V
-        return [N, n, V, D, E]
+    async def analyze_bytecode(self, bytecode_path):
+        try:
+            with open(bytecode_path, 'rb') as file:
+                bytecode_data = file.read()
+            bytecode = Bytecode.from_code(bytecode_data)
+            features = self.bytecode_analyzer.extract_all_features(bytecode)
+            logging.info(f"Extracted features: {features}")
+            return features
+        except Exception as e:
+            logging.error(f"Error analyzing bytecode: {e}")
 
     def train_model(self, training_data, labels):
         scaler = StandardScaler()
@@ -732,7 +1466,6 @@ class AIBrain:
 
     async def run_mod(self, mod_file):
         try:
-            # Replace with actual command to run the mod
             result = subprocess.run(['java', '-jar', os.path.join(self.mod_directory, mod_file)], capture_output=True,
                                     text=True)
             if result.returncode == 0:
@@ -747,7 +1480,6 @@ class AIBrain:
 
     async def fix_and_retest_mod(self, mod_file):
         try:
-            # Dummy example: Assuming the mod can be fixed by re-running suggest_fix
             with open(os.path.join(self.mod_directory, mod_file), 'r', encoding='utf-8') as file:
                 content = file.read()
             fixed_content = await self.suggest_fix(content)
@@ -786,8 +1518,7 @@ class AIBrain:
 
     async def test_mods_in_sandbox(self):
         container = await self.create_sandbox_environment()
-        if container:
-            # Run tests inside the sandbox
+        if (container):
             await self.test_mods()
             await self.destroy_sandbox_environment(container)
 
@@ -872,11 +1603,9 @@ class AIBrain:
         return incompatible_mods
 
     def get_minecraft_version(self):
-        # Implement the logic to get the current Minecraft version
         return "1.16.5"
 
     def get_forge_version(self):
-        # Implement the logic to get the current Forge version
         return "36.1.0"
 
     async def fetch_community_knowledge(self, query):
@@ -950,40 +1679,101 @@ class AIBrain:
             logging.error(f"Error analyzing bytecode: {e}")
 
 
-# Example usage
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    ai_brain = AIBrain(mod_directory=r"C:\Users\jay5a\curseforge\minecraft\Instances\Crazy Craft Updated\mods")
+
+    default_mod_directory = Path.home() / "AI_Brain_Mods"
+    default_mod_directory.mkdir(exist_ok=True)
+
+    ai_brain = AIBrain(mod_directory=str(default_mod_directory))
 
 
     async def main():
-        await ai_brain.run_tests()
-        await ai_brain.process_mod_jar('path/to/sample.jar')
-        mods = ai_brain.scan_mods()
-        logging.info(f"Scanned mods: {mods}")
-        ai_brain.update_mods(mods)
-        dependencies_info = ai_brain.resolve_all_dependencies(mods)
-        logging.info(f"Resolved dependencies: {dependencies_info}")
-        performance_data = [
-            {'function_name': 'function1', 'elapsed_time': 0.2, 'memory_used': 10.0},
-            {'function_name': 'function2', 'elapsed_time': 1.2, 'memory_used': 50.0},
-            {'function_name': 'function3', 'elapsed_time': 0.5, 'memory_used': 20.0},
-        ]
-        predictions = ai_brain.optimize(performance_data)
-        suggestions = ai_brain.suggest_optimizations(predictions, threshold=0.8)
-        for suggestion in suggestions:
-            logging.info(suggestion)
-        await ai_brain.test_mods_in_sandbox()
-        compatibility_conflicts = await ai_brain.analyze_mod_compatibility(mods)
-        logging.info(f"Compatibility conflicts: {compatibility_conflicts}")
-        error_suggestions = await ai_brain.diagnose_and_suggest_fixes('path/to/error.log')
-        logging.info(f"Error suggestions: {error_suggestions}")
-        version_incompatibilities = ai_brain.check_version_compatibility(mods)
-        logging.info(f"Version incompatibilities: {version_incompatibilities}")
-        community_knowledge = await ai_brain.integrate_community_knowledge(mods)
-        logging.info(f"Community knowledge: {community_knowledge}")
-        await ai_brain.decompile_mod('path/to/input.jar', '1.16.5')
-        await ai_brain.analyze_bytecode('path/to/bytecode.class')
+        try:
+            logging.info("Diagnosing errors and suggesting fixes...")
+
+            default_error_log_path = Path("path/to/default/error.log")
+            if not default_error_log_path.is_file():
+                logging.warning(f"Default error log file path is invalid: {default_error_log_path}")
+                error_log_path = Path(input("Enter the path to the error log file: ").strip())
+                if not error_log_path.is_file():
+                    logging.error(f"Invalid error log file path: {error_log_path}. Exiting.")
+                    return
+            else:
+                error_log_path = default_error_log_path
+
+            error_suggestions = await ai_brain.diagnose_and_suggest_fixes(error_log_path)
+            logging.info(f"Error suggestions: {error_suggestions}")
+
+            try:
+                documents_folder = Path.home() / "Documents"
+                if not documents_folder.exists():
+                    logging.error(f"Documents folder does not exist: {documents_folder}")
+                    return
+
+                output_file_path = documents_folder / "AI_Brain_Error_Suggestions.txt"
+                with open(output_file_path, 'w', encoding='utf-8') as f:
+                    f.write("Error Suggestions:\n")
+                    for suggestion in error_suggestions:
+                        f.write(f"{suggestion}\n")
+
+                logging.info(f"Error suggestions written to {output_file_path}")
+
+                if not await ai_brain.test_mods_in_sandbox():
+                    logging.error("Mod testing failed in sandbox environment.")
+                    return
+
+                mods = ai_brain.scan_mods()
+                if not mods:
+                    logging.error("No mods found. Exiting.")
+                    return
+
+                mods_with_updates = ai_brain.update_mods(mods)
+                if not mods_with_updates:
+                    logging.info("No mod updates available.")
+                else:
+                    logging.info(f"Updated mods: {mods_with_updates}")
+
+                logging.info("Checking mod version compatibility...")
+                incompatible_mods = ai_brain.check_version_compatibility(mods)
+                if incompatible_mods:
+                    logging.warning(f"Incompatible mods found: {incompatible_mods}")
+
+                logging.info("Resolving mod dependencies...")
+                dependency_results = ai_brain.resolve_all_dependencies(mods)
+                if dependency_results['cyclic_dependencies']:
+                    logging.warning(f"Cyclic dependencies found: {dependency_results['cyclic_dependencies']}")
+                else:
+                    logging.info(f"Resolved dependencies: {dependency_results['resolved_dependencies']}")
+
+                compatibility_errors = await ai_brain.analyze_mod_compatibility(mods)
+                if compatibility_errors:
+                    logging.warning(f"Compatibility errors found: {compatibility_errors}")
+                    await ai_brain.apply_fixes(compatibility_errors)
+                else:
+                    logging.info("No compatibility errors found.")
+
+                community_suggestions = await ai_brain.integrate_community_knowledge(mods)
+                if community_suggestions:
+                    logging.info(f"Community suggestions: {community_suggestions}")
+                else:
+                    logging.info("No community suggestions found.")
+
+                performance_data = [
+                    {'function_name': 'func1', 'elapsed_time': 0.5, 'memory_used': 200},
+                    {'function_name': 'func2', 'elapsed_time': 0.7, 'memory_used': 150},
+                ]
+                logging.info("Optimizing performance data...")
+                optimization_suggestions = ai_brain.optimize(performance_data)
+                if optimization_suggestions:
+                    logging.info(f"Optimization suggestions: {optimization_suggestions}")
+                else:
+                    logging.info("No optimization suggestions found.")
+            except Exception as e:
+                logging.error(f"Error during the execution of the AI Brain: {e}", exc_info=True)
+        except Exception as e:
+            logging.error(f"Error in the main function: {e}", exc_info=True)
 
 
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
