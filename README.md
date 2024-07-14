@@ -1,7 +1,7 @@
-                                                    AI Brain for Minecraft Mod Management
-Welcome to the AI Brain for Minecraft Mod Management! This project provides a sophisticated AI-driven solution to manage, analyze, and optimize Minecraft mods, ensuring compatibility and performance. 
-Below you'll find a comprehensive guide to understanding, setting up, and utilizing this system.
+ModMaster AI
 
+Overview
+Welcome to ModMaster AI, an advanced AI Brain for Minecraft Mod Management. This project provides a sophisticated AI-driven solution to manage, analyze, and optimize Minecraft mods, ensuring compatibility and performance. Below you'll find a comprehensive guide to understanding, setting up, and utilizing this system.
 
 
 Table of Contents
@@ -40,9 +40,9 @@ identifying incom patible mods.
 
 Version Checking
 
-. Checks the version com patibility of Minecraft, Forge, and the mods being used.
+. Checks the version compatibility of Minecraft, Forge, and the mods being used.
 
-. Recom mends com patible versions if a mod is not com patible with the current setup.
+. Recommends compatible versions if a mod is not com patible with the current setup.
 
 
 Automated Testing
@@ -53,9 +53,9 @@ Automated Testing
 
 Community Knowledge Integration
 
-. Integrates knowledge from Minecraft modding com munities, forums, and wikis.
+. Integrates knowledge from Minecraft modding communities, forums, and wikis.
 
-. Pulls in solutions to com mon problems, recom mendations for mod com binations, and tips for
+. Pulls in solutions to common problems, recommendations for mod combinations, and tips for
 mod configuration.
 
 
@@ -84,7 +84,7 @@ Prerequisites
 
 1. Clone the Repository
 git clone https://github. com/Boldydead/ai-brain-minecraft-mod-management.git
-cd ai-brain-minecraft-mod-management
+cd  ModMasterAI
 
 2. Create a Virtual Environment
 python -m venv venv
@@ -98,7 +98,7 @@ Ensure Docker is installed and running on your system. You may need to install D
 Docker's official site.
 
 5. Download Additional Resources
-The project requires certain jar files for decom pilation and other tasks. Ensure these are
+The project requires certain jar files for decompilation and other tasks. Ensure these are
 downloaded as part of the setup process.
 
 
@@ -115,6 +115,7 @@ python ai_brain.py
 
 Example Script
 Here's an example script demonstrating the main functionalities:
+
 import asyncio
 import logging
 from ai_brain import AIBrain
@@ -176,8 +177,11 @@ We welcome contributions from the com munity! To contribute:
 
 Ensure your code follows the project's coding standards and includes appropriate tests.
 
+License
+This project is licensed under the MIT License. See the LICENSE file for more details.
+
 
 Contact
 For any questions or suggestions, feel free to open an issue on GitHub or contact us directly at [jay5am@icloud.com].
 
-Thank you for using the AI Brain for Minecraft Mod Management! We hope this tool enhances your Minecraft modding experience.
+Thank you for using ModMaster AI! We hope this tool enhances your Minecraft modding experience.
