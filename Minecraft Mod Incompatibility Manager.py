@@ -1020,12 +1020,12 @@ class AIBrain:
             start_time = time.time()
             for model_name, model_path in self.model_paths.items():
                 try:
-                    if model_name == 'code_fixer':
+                    if (model_name == 'code_fixer'):
                         tokenizer = AutoTokenizer.from_pretrained(model_path)
                         model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
                         self.models[model_name] = pipeline('text2text-generation', model=model, tokenizer=tokenizer)
-                    elif model_name == 'optimizer':
-                        if os.path.exists(model_path):
+                    elif (model_name == 'optimizer'):
+                        if (os.path.exists(model_path)):
                             self.models[model_name] = joblib.load(model_path)
                         else:
                             self.models[model_name] = None
@@ -1518,7 +1518,7 @@ class AIBrain:
 
     async def test_mods_in_sandbox(self):
         container = await self.create_sandbox_environment()
-        if (container):
+        if container:
             await self.test_mods()
             await self.destroy_sandbox_environment(container)
 
